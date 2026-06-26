@@ -1,4 +1,4 @@
-package com.chrome.auto.ui.theme
+package com.chromeapp.ui.theme
 
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme

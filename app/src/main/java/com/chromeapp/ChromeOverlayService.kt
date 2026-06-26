@@ -1,4 +1,4 @@
-package com.chrome.auto
+package com.chromeapp
 
 import android.app.Notification
 import android.app.NotificationChannel

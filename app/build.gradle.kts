@@ -4,16 +4,16 @@ plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.google.devtools.ksp)
-  alias(libs.plugins.secrets)
+
   alias(libs.plugins.google.services)
 }
 
 android {
-  namespace = "com.chrome.auto"
+  namespace = "com.chromeapp"
   compileSdk = 36
 
   defaultConfig {
-    applicationId = "com.chrome.auto"
+    applicationId = "com.chromeapp"
     minSdk = 24
     targetSdk = 36
     versionCode = 1
@@ -52,9 +52,7 @@ android {
 
 // Configure the Secrets Gradle Plugin to use .env and .env.example files
 // to match the convention used in Web projects.
-secrets {
-  propertiesFileName = ".env"
-}
+
 
 googleServices {
   missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN

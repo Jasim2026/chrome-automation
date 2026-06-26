@@ -1,4 +1,4 @@
-package com.chrome.auto
+package com.chromeapp
 
 import android.util.Xml
 import kotlinx.coroutines.Dispatchers

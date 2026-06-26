@@ -1,4 +1,4 @@
-package com.chrome.auto
+package com.chromeapp
 
 import android.content.Context
 import android.content.Intent
@@ -149,7 +149,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.chrome.auto.ui.theme.MyApplicationTheme
+import com.chromeapp.ui.theme.MyApplicationTheme
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {

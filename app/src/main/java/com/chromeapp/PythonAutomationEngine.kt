@@ -1,4 +1,4 @@
-package com.chrome.auto
+package com.chromeapp
 
 import android.os.Handler
 import android.os.Looper
