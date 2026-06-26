@@ -4,7 +4,7 @@ plugins {
   alias(libs.plugins.android.application)
   alias(libs.plugins.kotlin.compose)
   alias(libs.plugins.google.devtools.ksp)
-
+  alias(libs.plugins.kotlin.android)
   alias(libs.plugins.google.services)
 }
 
@@ -20,6 +20,9 @@ android {
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+  }
+  kotlinOptions {
+    jvmTarget = "11"
   }
 
   signingConfigs {
