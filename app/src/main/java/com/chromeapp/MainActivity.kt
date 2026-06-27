@@ -151,6 +151,9 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.chromeapp.ui.theme.MyApplicationTheme
 import kotlinx.coroutines.launch
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.TextRange
+import androidx.activity.compose.BackHandler
 
 class MainActivity : ComponentActivity() {
 
@@ -233,6 +236,112 @@ fun BrowserMainScreen(viewModel: BrowserViewModel) {
 
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    BackHandler(enabled = true) {
+        if (showAutomationControlSheet) {
+            showAutomationControlSheet = false
+        } else if (showScriptWorkspace) {
+            showScriptWorkspace = false
+        } else if (showTabSwitcher) {
+            viewModel.setShowTabSwitcher(false)
+        } else if (isSearching) {
+            isSearching = false
+        } else if (activeTab?.webView?.canGoBack() == true) {
+            viewModel.goBackInActiveTab()
+        } else {
+            // Minimize the app (Go to home screen) instead of killing it. 
+            // This ensures your background Automation Service stays alive!
+            val intent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_HOME)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            context.startActivity(intent)
+        }
+    }
+    val showFileChooser by viewModel.showFileChooser.collectAsState()
+    val pendingDownload by viewModel.pendingDownloadPrompt.collectAsState()
+    var showDownloadsPanel by remember { mutableStateOf(false) }
+
+    // FILE PICKER LAUNCHER
+    val fileChooserLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetMultipleContents()
+    ) { uris ->
+        viewModel.onFilesSelected(uris)
+    }
+
+    LaunchedEffect(showFileChooser) {
+        if (showFileChooser) {
+            try {
+                fileChooserLauncher.launch("*/*") // Accept all file types
+            } catch (e: Exception) {
+                viewModel.onFilesSelected(emptyList()) // Fail safely
+            }
+        }
+    }
+
+    // DOWNLOAD PROMPT DIALOG
+    if (pendingDownload != null) {
+        var cronInput by remember { mutableStateOf("") }
+        var isScheduling by remember { mutableStateOf(false) }
+
+        AlertDialog(
+            onDismissRequest = { viewModel.clearPendingDownloadPrompt() },
+            containerColor = if (isDarkMode) Color(0xFF202124) else Color.White,
+            title = { Text(if (isScheduling) "Schedule Download" else "Download File?", color = if (isDarkMode) Color.White else Color.Black) },
+            text = {
+                Column {
+                    Text(text = pendingDownload!!.fileName, fontWeight = FontWeight.Bold, color = Color(0xFF1A73E8))
+                    Spacer(modifier = Modifier.height(12.dp))
+                    
+                    if (isScheduling) {
+                        Text("Enter Cron Expression (e.g., */5 * * * *) or Time (e.g., 15:30):", fontSize = 12.sp, color = Color.Gray)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = cronInput,
+                            onValueChange = { cronInput = it },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else {
+                        Text("Do you want to download this file now or schedule it for later?", fontSize = 14.sp, color = if(isDarkMode) Color.LightGray else Color.DarkGray)
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    if (isScheduling) {
+                        viewModel.startDownload(pendingDownload!!.url, pendingDownload!!.fileName, pendingDownload!!.mimetype, pendingDownload!!.userAgent, cronInput.ifEmpty { "*/5 * * * *" })
+                    } else {
+                        viewModel.startDownload(pendingDownload!!.url, pendingDownload!!.fileName, pendingDownload!!.mimetype, pendingDownload!!.userAgent)
+                    }
+                    viewModel.clearPendingDownloadPrompt()
+                    showDownloadsPanel = true
+                }) {
+                    Text(if (isScheduling) "Schedule" else "Download Now")
+                }
+            },
+            dismissButton = {
+                if (!isScheduling) {
+                    OutlinedButton(onClick = { isScheduling = true }) {
+                        Text("Schedule (Cron)")
+                    }
+                } else {
+                    TextButton(onClick = { isScheduling = false }) {
+                        Text("Back", color = Color.Gray)
+                    }
+                }
+            }
+        )
+    }
+
+    // DOWNLOADS MANAGER PANEL
+    if (showDownloadsPanel) {
+        DownloadsManagerDialog(
+            downloads = viewModel.downloads.collectAsState().value,
+            onCancel = { viewModel.cancelDownload(it) },
+            onRemove = { viewModel.removeDownload(it) },
+            onClose = { showDownloadsPanel = false }
+        )
+    }
 
     Scaffold(
         modifier = Modifier
@@ -285,7 +394,7 @@ fun BrowserMainScreen(viewModel: BrowserViewModel) {
                                         viewModel.setIncognito(true)
                                         viewModel.createNewTab()
                                     }
-                                    "Downloads" -> context.startActivity(android.content.Intent(android.app.DownloadManager.ACTION_VIEW_DOWNLOADS))
+                                    "Downloads" -> showDownloadsPanel = true
                                     "Recent tabs" -> showHistoryPanel = true
                                     "Share" -> {
                                         activeTab?.url?.let { url ->
@@ -340,7 +449,7 @@ fun BrowserMainScreen(viewModel: BrowserViewModel) {
                                         viewModel.setIncognito(true)
                                         viewModel.createNewTab()
                                     }
-                                    "Downloads" -> context.startActivity(android.content.Intent(android.app.DownloadManager.ACTION_VIEW_DOWNLOADS))
+                                    "Downloads" -> showDownloadsPanel = true
                                     "Recent tabs" -> showHistoryPanel = true
                                     "Share" -> {
                                         activeTab?.url?.let { url ->
@@ -1199,7 +1308,29 @@ fun ActiveSearchScreen(
     val isIncognito by viewModel.isIncognito.collectAsState()
     val history by viewModel.history.collectAsState()
     
-    var searchInputText by remember { mutableStateOf("") }
+    // Get the current active tab URL to pre-fill the input
+    val tabs by viewModel.tabs.collectAsState()
+    val activeTabId by viewModel.activeTabId.collectAsState()
+    val activeTab = tabs.find { it.id == activeTabId }
+    val currentUrl = remember {
+        val url = activeTab?.url ?: ""
+        if (url == "chrome://newtab" || url.isEmpty()) "" else url
+    }
+
+    // Using TextFieldValue to control selection range programmatically
+    var textFieldValue by remember {
+        mutableStateOf(
+            TextFieldValue(
+                text = currentUrl,
+                // Prefill and select all text instantly on opening
+                selection = TextRange(0, currentUrl.length)
+            )
+        )
+    }
+
+    // Bridge searchInputText to prevent breaking suggestions filter
+    val searchInputText = textFieldValue.text
+    
     val focusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -1265,8 +1396,8 @@ fun ActiveSearchScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 BasicTextField(
-                    value = searchInputText,
-                    onValueChange = { searchInputText = it },
+                    value = textFieldValue,
+                    onValueChange = { textFieldValue = it },
                     textStyle = TextStyle(
                         color = if (isDarkMode) Color.White else Color.Black,
                         fontSize = 14.sp,
@@ -1279,8 +1410,8 @@ fun ActiveSearchScreen(
                     ),
                     keyboardActions = KeyboardActions(
                         onSearch = {
-                            if (searchInputText.isNotEmpty()) {
-                                viewModel.loadUrlInActiveTab(searchInputText)
+                            if (textFieldValue.text.isNotEmpty()) {
+                                viewModel.loadUrlInActiveTab(textFieldValue.text)
                                 focusManager.clearFocus()
                                 keyboardController?.hide()
                                 onClose()
@@ -1293,7 +1424,7 @@ fun ActiveSearchScreen(
                         .focusRequester(focusRequester)
                         .testTag("active_search_input"),
                     decorationBox = { innerTextField ->
-                        if (searchInputText.isEmpty()) {
+                        if (textFieldValue.text.isEmpty()) {
                             Text(
                                 "Search Google or type URL",
                                 color = Color.Gray,
@@ -1304,9 +1435,9 @@ fun ActiveSearchScreen(
                     }
                 )
                 
-                if (searchInputText.isNotEmpty()) {
+                if (textFieldValue.text.isNotEmpty()) {
                     IconButton(
-                        onClick = { searchInputText = "" },
+                        onClick = { textFieldValue = TextFieldValue("") },
                         modifier = Modifier.size(24.dp)
                     ) {
                         Icon(
@@ -1384,7 +1515,13 @@ fun ActiveSearchScreen(
                     Spacer(modifier = Modifier.width(8.dp))
                     
                     IconButton(
-                        onClick = { searchInputText = suggestion.text },
+                        onClick = { 
+                            // Refill the input text, positioning the cursor at the very end
+                            textFieldValue = TextFieldValue(
+                                text = suggestion.text,
+                                selection = TextRange(suggestion.text.length)
+                            )
+                        },
                         modifier = Modifier.size(36.dp)
                     ) {
                         Icon(
@@ -1868,8 +2005,10 @@ fun ChromeNewTabPage(
                     modifier = Modifier
                         .padding(end = 8.dp)
                         .clip(RoundedCornerShape(18.dp))
-                        .background(if (isAiMode) Color(0xFF34A853).copy(alpha = 0.2f) else cardColor)
-                        .clickable { onToggleAiMode(!isAiMode) }
+                        .background(cardColor) // Kept neutral like other chips
+                        .clickable { 
+                            onOpenUrl("https://www.google.com/search?q=&client=ms-android-motorola-rvo3&sourceid=chrome-mobile&ie=UTF-8&udm=50&aep=43&cud=0&qsubts=1782549516153&source=chrome.crn.obic") 
+                        }
                         .padding(horizontal = 16.dp, vertical = 8.dp),
                     contentAlignment = Alignment.Center
                 ) {
@@ -1877,13 +2016,13 @@ fun ChromeNewTabPage(
                         Icon(
                             imageVector = Icons.Default.Star,
                             contentDescription = "AI Mode",
-                            tint = if (isAiMode) Color(0xFF34A853) else Color.Gray,
+                            tint = Color(0xFF34A853), // Google spark green color
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
                             text = "AI Mode",
-                            color = if (isAiMode) Color(0xFF34A853) else textColor,
+                            color = textColor,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold
                         )
@@ -3569,5 +3708,84 @@ fun GoogleAccountDialog(
             }
         },
         confirmButton = {}
+    )
+    
+}
+@Composable
+fun DownloadsManagerDialog(
+    downloads: List<BrowserViewModel.DownloadItem>,
+    onCancel: (String) -> Unit,
+    onRemove: (String) -> Unit,
+    onClose: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onClose,
+        title = { Text("Downloads Manager", color = Color.White) },
+        containerColor = Color(0xFF212121),
+        text = {
+            if (downloads.isEmpty()) {
+                Text("No downloads yet.", color = Color.LightGray)
+            } else {
+                LazyColumn(modifier = Modifier.height(400.dp)) {
+                    items(downloads) { item ->
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFF2D2E30)),
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Text(item.fileName, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Spacer(modifier = Modifier.height(4.dp))
+                                
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    val stateColor = when(item.state) {
+                                        BrowserViewModel.DownloadState.COMPLETED -> Color(0xFF34A853)
+                                        BrowserViewModel.DownloadState.FAILED -> Color(0xFFEA4335)
+                                        BrowserViewModel.DownloadState.SCHEDULED -> Color(0xFFF4B400)
+                                        BrowserViewModel.DownloadState.CANCELED -> Color.Gray
+                                        else -> Color(0xFF1A73E8)
+                                    }
+                                    Text("Status: ${item.state.name}", color = stateColor, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                                    
+                                    if (item.state == BrowserViewModel.DownloadState.SCHEDULED) {
+                                        Text("⏱ Cron: ${item.cronExpression}", color = Color.LightGray, fontSize = 10.sp)
+                                    }
+                                }
+                                
+                                if (item.state == BrowserViewModel.DownloadState.DOWNLOADING) {
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    LinearProgressIndicator(
+                                        progress = { item.progress },
+                                        modifier = Modifier.fillMaxWidth().height(4.dp),
+                                        color = Color(0xFF1A73E8)
+                                    )
+                                }
+                                
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                                    if (item.state == BrowserViewModel.DownloadState.DOWNLOADING || item.state == BrowserViewModel.DownloadState.SCHEDULED) {
+                                        OutlinedButton(onClick = { onCancel(item.id) }, modifier = Modifier.height(30.dp), contentPadding = PaddingValues(horizontal = 8.dp)) {
+                                            Text("Cancel", fontSize = 10.sp, color = Color.White)
+                                        }
+                                    } else {
+                                        OutlinedButton(onClick = { onRemove(item.id) }, modifier = Modifier.height(30.dp), contentPadding = PaddingValues(horizontal = 8.dp)) {
+                                            Text("Remove from list", fontSize = 10.sp, color = Color.Gray)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onClose, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A73E8))) {
+                Text("Close", color = Color.White)
+            }
+        }
     )
 }

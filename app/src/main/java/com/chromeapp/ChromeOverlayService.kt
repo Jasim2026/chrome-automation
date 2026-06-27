@@ -71,7 +71,7 @@ class ChromeOverlayService : Service() {
             startForeground(
                 NOTIFICATION_ID, 
                 buildNotification(), 
-                1024 // ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED
             )
         } else {
             startForeground(NOTIFICATION_ID, buildNotification())
@@ -532,5 +532,11 @@ class ChromeOverlayService : Service() {
         }
         _isServiceRunning.value = false
         serviceInstance = null
+    }
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        // If the user swipes the app away in the Recents menu, the UI is dead.
+        // We must kill the overlay to prevent accessing destroyed WebViews/ViewModels.
+        stopSelf()
     }
 }

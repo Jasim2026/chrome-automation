@@ -27,6 +27,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import android.content.ContentValues
+import android.provider.MediaStore
+import android.webkit.ValueCallback
+import kotlinx.coroutines.flow.update
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.UUID
 
 data class BrowserTab(
@@ -71,7 +77,64 @@ data class GoogleAccount(
 )
 
 class BrowserViewModel(application: Application) : AndroidViewModel(application) {
+    // --- FILE UPLOAD STATE ---
+    var pendingFileChooserCallback: ValueCallback<Array<Uri>>? = null
+    
+    private val _showFileChooser = MutableStateFlow(false)
+    val showFileChooser: StateFlow<Boolean> = _showFileChooser.asStateFlow()
 
+    fun resetFileChooserState() {
+        _showFileChooser.value = false
+    }
+
+    fun onFilesSelected(uris: List<Uri>) {
+        if (uris.isEmpty()) {
+            pendingFileChooserCallback?.onReceiveValue(null)
+        } else {
+            pendingFileChooserCallback?.onReceiveValue(uris.toTypedArray())
+        }
+        pendingFileChooserCallback = null
+        resetFileChooserState()
+    }
+
+    // --- CUSTOM DOWNLOAD MANAGER STATE ---
+    enum class DownloadState { DOWNLOADING, COMPLETED, FAILED, SCHEDULED, CANCELED }
+
+    data class DownloadItem(
+        val id: String = UUID.randomUUID().toString(),
+        val url: String,
+        val fileName: String,
+        val mimeType: String?,
+        val userAgent: String?,
+        val progress: Float = 0f,
+        val state: DownloadState = DownloadState.DOWNLOADING,
+        val cronExpression: String? = null,
+        val error: String? = null
+    )
+
+    data class PendingDownload(
+        val url: String,
+        val fileName: String,
+        val mimetype: String?,
+        val userAgent: String?
+    )
+
+    private val _pendingDownloadPrompt = MutableStateFlow<PendingDownload?>(null)
+    val pendingDownloadPrompt: StateFlow<PendingDownload?> = _pendingDownloadPrompt.asStateFlow()
+
+    private val _downloads = MutableStateFlow<List<DownloadItem>>(emptyList())
+    val downloads: StateFlow<List<DownloadItem>> = _downloads.asStateFlow()
+
+    private var cronDownloadCheckerJob: Job? = null
+
+    fun clearPendingDownloadPrompt() {
+        _pendingDownloadPrompt.value = null
+    }
+
+    companion object {
+        const val AI_CHAT_URL = "https://www.google.com/search?q=&client=ms-android-motorola-rvo3&sourceid=chrome-mobile&ie=UTF-8&udm=50&aep=43&cud=0&qsubts=1782549516153&source=chrome.crn.obic"
+    }
+    private var preloadWebView: WebView? = null
     private val context = application.applicationContext
     private val prefs = application.getSharedPreferences("chrome_prefs", Context.MODE_PRIVATE)
 
@@ -250,6 +313,15 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     fun setDarkMode(enabled: Boolean) {
         _isDarkMode.value = enabled
         prefs.edit().putBoolean("dark_mode", enabled).apply()
+        
+        // ADD THIS: Dynamically inject the new theme into all currently open tabs
+        viewModelScope.launch(Dispatchers.Main) {
+            _tabs.value.forEach { tab ->
+                tab.webView?.let { webView ->
+                    applyDarkModeToWebView(webView, enabled)
+                }
+            }
+        }
     }
 
     fun setAiMode(enabled: Boolean) {
@@ -339,6 +411,8 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         } catch (e: Exception) {
             e.printStackTrace()
         }
+        startCronDownloadChecker()
+        preloadAiUrl()
     }
 
     fun getActiveTab(): BrowserTab? {
@@ -353,6 +427,21 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             _tabs.value = updatedList
             _activeTabId.value = newTab.id
             _showTabSwitcher.value = false
+        }
+    }
+    
+    private fun applyDarkModeToWebView(webView: WebView, isDark: Boolean) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            // Android 13+ (API 33+)
+            webView.settings.isAlgorithmicDarkeningAllowed = isDark
+        } else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            // Android 10 to 12 (API 29-32)
+            @Suppress("DEPRECATION")
+            webView.settings.forceDark = if (isDark) {
+                android.webkit.WebSettings.FORCE_DARK_ON
+            } else {
+                android.webkit.WebSettings.FORCE_DARK_OFF
+            }
         }
     }
 
@@ -452,19 +541,20 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                     }
 
                     override fun onCreateWindow(view: WebView?, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message?): Boolean {
-                        try {
-                            val newWebView = WebView(context).apply {
-                                settings.javaScriptEnabled = true
-                                webViewClient = object : WebViewClient() {}
-                            }
+                        viewModelScope.launch {
+                            // 1. Create a fully configured tab with your existing logic
+                            val newTab = createTabInstance("about:blank")
+                            
+                            // 2. Add it to the UI tab array so the user can see it
+                            _tabs.value = _tabs.value + newTab
+                            _activeTabId.value = newTab.id
+                            
+                            // 3. Connect the transport to load the requested URL into this new tab
                             val transport = resultMsg?.obj as? WebView.WebViewTransport
-                            transport?.webView = newWebView
+                            transport?.webView = newTab.webView
                             resultMsg?.sendToTarget()
-                            return true
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                            return false
                         }
+                        return true
                     }
 
                     override fun onConsoleMessage(consoleMessage: android.webkit.ConsoleMessage?): Boolean {
@@ -474,12 +564,26 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                         }
                         return super.onConsoleMessage(consoleMessage)
                     }
+                    override fun onShowFileChooser(
+                        webView: WebView?,
+                        filePathCallback: ValueCallback<Array<Uri>>?,
+                        fileChooserParams: FileChooserParams?
+                    ): Boolean {
+                        pendingFileChooserCallback?.onReceiveValue(null)
+                        pendingFileChooserCallback = filePathCallback
+                        _showFileChooser.value = true
+                        return true
+                    }
                 }
 
                 setDownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
-                    downloadFile(url, contentDisposition, mimetype, userAgent)
+                    // Instead of downloading instantly, we show a prompt
+                    val fileName = android.webkit.URLUtil.guessFileName(url, contentDisposition, mimetype)
+                    _pendingDownloadPrompt.value = PendingDownload(url, fileName, mimetype, userAgent)
                 }
             }
+            
+            applyDarkModeToWebView(webView, _isDarkMode.value)
 
             if (initialUrl != "chrome://newtab") {
                 webView.loadUrl(initialUrl)
@@ -690,42 +794,145 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         _consoleLogs.value = emptyList()
     }
 
-    fun downloadFile(
-        url: String,
-        contentDisposition: String? = null,
-        mimetype: String? = null,
-        userAgent: String? = null
-    ) {
-        try {
-            val request = DownloadManager.Request(Uri.parse(url))
-            if (mimetype != null) {
-                request.setMimeType(mimetype)
+    fun startDownload(url: String, fileName: String, mimetype: String?, userAgent: String?, cron: String? = null) {
+        val initialState = if (cron.isNullOrEmpty()) DownloadState.DOWNLOADING else DownloadState.SCHEDULED
+        val newItem = DownloadItem(
+            url = url,
+            fileName = fileName,
+            mimeType = mimetype,
+            userAgent = userAgent,
+            state = initialState,
+            cronExpression = cron
+        )
+        
+        _downloads.update { listOf(newItem) + it }
+        
+        if (initialState == DownloadState.DOWNLOADING) {
+            executeDownload(newItem.id)
+        } else {
+            log("Scheduled download for $fileName with cron: $cron", LogType.INFO)
+        }
+    }
+
+    private fun executeDownload(downloadId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val item = _downloads.value.find { it.id == downloadId } ?: return@launch
+            
+            try {
+                // Use MediaStore for Android 10+ compatible storage without permissions
+                val resolver = context.contentResolver
+                val contentValues = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, item.fileName)
+                    put(MediaStore.Downloads.MIME_TYPE, item.mimeType ?: "application/octet-stream")
+                    val customPath = _customDownloadPath.value.trim().trim('/')
+                    if (customPath.isNotEmpty()) {
+                        put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/$customPath")
+                    }
+                }
+
+                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
+                    ?: throw Exception("Failed to create file in MediaStore")
+
+                val connection = URL(item.url).openConnection() as HttpURLConnection
+                item.userAgent?.let { connection.setRequestProperty("User-Agent", it) }
+                val cookie = CookieManager.getInstance().getCookie(item.url)
+                if (cookie != null) connection.setRequestProperty("Cookie", cookie)
+                
+                connection.connect()
+                val fileLength = connection.contentLength
+                
+                resolver.openOutputStream(uri)?.use { output ->
+                    connection.inputStream.use { input ->
+                        val data = ByteArray(8192)
+                        var total: Long = 0
+                        var count: Int
+                        
+                        while (input.read(data).also { count = it } != -1) {
+                            // Stop if canceled
+                            val currentState = _downloads.value.find { it.id == downloadId }?.state
+                            if (currentState == DownloadState.CANCELED) {
+                                resolver.delete(uri, null, null)
+                                return@launch
+                            }
+                            
+                            total += count
+                            output.write(data, 0, count)
+                            
+                            if (fileLength > 0 && total % (8192 * 10) == 0L) { // update progress periodically
+                                val prog = (total * 100f / fileLength) / 100f
+                                updateDownloadState(downloadId) { it.copy(progress = prog) }
+                            }
+                        }
+                    }
+                }
+                
+                updateDownloadState(downloadId) { it.copy(state = DownloadState.COMPLETED, progress = 1f) }
+                log("Download completed: ${item.fileName}", LogType.SUCCESS)
+                
+            } catch (e: Exception) {
+                updateDownloadState(downloadId) { it.copy(state = DownloadState.FAILED, error = e.localizedMessage) }
+                log("Download failed: ${item.fileName} - ${e.message}", LogType.ERROR)
             }
-            request.addRequestHeader("cookie", CookieManager.getInstance().getCookie(url))
-            if (userAgent != null) {
-                request.addRequestHeader("User-Agent", userAgent)
+        }
+    }
+
+    fun cancelDownload(id: String) {
+        updateDownloadState(id) { it.copy(state = DownloadState.CANCELED) }
+    }
+
+    fun removeDownload(id: String) {
+        _downloads.update { list -> list.filter { it.id != id } }
+    }
+
+    private fun updateDownloadState(id: String, transformer: (DownloadItem) -> DownloadItem) {
+        _downloads.update { list ->
+            list.map { if (it.id == id) transformer(it) else it }
+        }
+    }
+
+    private fun startCronDownloadChecker() {
+        cronDownloadCheckerJob = viewModelScope.launch(Dispatchers.Default) {
+            var lastTriggerMinute = -1
+            while (true) {
+                val calendar = java.util.Calendar.getInstance()
+                val curMinute = calendar.get(java.util.Calendar.MINUTE)
+                val minuteOfYear = calendar.get(java.util.Calendar.DAY_OF_YEAR) * 1440 + calendar.get(java.util.Calendar.HOUR_OF_DAY) * 60 + curMinute
+
+                if (minuteOfYear != lastTriggerMinute) {
+                    val scheduledItems = _downloads.value.filter { it.state == DownloadState.SCHEDULED && !it.cronExpression.isNullOrEmpty() }
+                    
+                    for (item in scheduledItems) {
+                        // Simple cron parser (handles "*/5 * * * *" and "* * * * *")
+                        val cron = item.cronExpression!!.trim()
+                        var trigger = false
+                        
+                        if (cron.startsWith("*/")) {
+                            val interval = cron.substringAfter("*/").substringBefore(" ").toIntOrNull() ?: 5
+                            if (curMinute % interval == 0) trigger = true
+                        } else if (cron == "* * * * *") {
+                            trigger = true
+                        } else {
+                            // Default to alarm format HH:mm if it's not a standard cron
+                            val timeParts = cron.split(":")
+                            if (timeParts.size >= 2) {
+                                val hr = timeParts[0].toIntOrNull() ?: -1
+                                val min = timeParts[1].toIntOrNull() ?: -1
+                                if (calendar.get(java.util.Calendar.HOUR_OF_DAY) == hr && curMinute == min) {
+                                    trigger = true
+                                }
+                            }
+                        }
+
+                        if (trigger) {
+                            updateDownloadState(item.id) { it.copy(state = DownloadState.DOWNLOADING) }
+                            log("Cron triggered download: ${item.fileName}", LogType.SUCCESS)
+                            executeDownload(item.id)
+                        }
+                    }
+                    lastTriggerMinute = minuteOfYear
+                }
+                delay(5000L) // Check every 5 seconds
             }
-            request.setDescription("Downloading file via Automation...")
-            
-            val fileName = android.webkit.URLUtil.guessFileName(url, contentDisposition, mimetype)
-            request.setTitle(fileName)
-            request.allowScanningByMediaScanner()
-            request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            
-            val customPath = _customDownloadPath.value.trim().trim('/')
-            val subPath = if (customPath.isNotEmpty()) {
-                "$customPath/$fileName"
-            } else {
-                fileName
-            }
-            
-            request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, subPath)
-            
-            val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-            dm.enqueue(request)
-            log("Download started to: Download/$subPath", LogType.SUCCESS)
-        } catch (e: Exception) {
-            log("Failed to start download: ${e.message}", LogType.ERROR)
         }
     }
 
@@ -931,7 +1138,26 @@ steps:
 
     override fun onCleared() {
         super.onCleared()
-        // Destroy all WebViews
+        preloadWebView?.destroy()
+        preloadWebView = null
+        // Destroy all other WebViews
         _tabs.value.forEach { it.webView?.destroy() }
+    }
+    private fun preloadAiUrl() {
+        viewModelScope.launch(Dispatchers.Main) {
+            try {
+                preloadWebView = WebView(context).apply {
+                    settings.apply {
+                        javaScriptEnabled = true
+                        domStorageEnabled = true
+                        databaseEnabled = true
+                        cacheMode = WebSettings.LOAD_DEFAULT // Instructs Chromium to respect & populate caches
+                    }
+                    loadUrl(AI_CHAT_URL)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
     }
 }
