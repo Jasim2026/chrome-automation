@@ -314,7 +314,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         _isDarkMode.value = enabled
         prefs.edit().putBoolean("dark_mode", enabled).apply()
         
-        // ADD THIS: Dynamically inject the new theme into all currently open tabs
+        // Dynamically inject the new theme into all currently open tabs
         viewModelScope.launch(Dispatchers.Main) {
             _tabs.value.forEach { tab ->
                 tab.webView?.let { webView ->
@@ -431,18 +431,32 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
     }
     
     private fun applyDarkModeToWebView(webView: WebView, isDark: Boolean) {
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-            // Android 13+ (API 33+)
-            webView.settings.isAlgorithmicDarkeningAllowed = isDark
-        } else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-            // Android 10 to 12 (API 29-32)
-            @Suppress("DEPRECATION")
-            webView.settings.forceDark = if (isDark) {
-                android.webkit.WebSettings.FORCE_DARK_ON
-            } else {
-                android.webkit.WebSettings.FORCE_DARK_OFF
-            }
+        // Set the base background color to prevent white flashes while loading
+        webView.setBackgroundColor(if (isDark) android.graphics.Color.parseColor("#121212") else android.graphics.Color.WHITE)
+
+        // Inject CSS Smart Invert filter to guarantee dark mode on all Android versions/themes
+        val js = if (isDark) {
+            """
+            (function() {
+                if (!document.getElementById('chrome-dark-mode-style')) {
+                    const style = document.createElement('style');
+                    style.id = 'chrome-dark-mode-style';
+                    style.innerHTML = 'html { background-color: #121212 !important; filter: invert(1) hue-rotate(180deg) !important; } img, video, iframe, canvas, picture, svg { filter: invert(1) hue-rotate(180deg) !important; }';
+                    document.head.appendChild(style);
+                }
+            })();
+            """.trimIndent()
+        } else {
+            """
+            (function() {
+                const style = document.getElementById('chrome-dark-mode-style');
+                if (style) {
+                    style.remove();
+                }
+            })();
+            """.trimIndent()
         }
+        webView.evaluateJavascript(js, null)
     }
 
     private suspend fun createTabInstance(initialUrl: String): BrowserTab = withContext(Dispatchers.Main) {
@@ -499,6 +513,10 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                     override fun onPageFinished(view: WebView?, url: String?) {
                         val pageTitle = view?.title ?: "New Tab"
                         val currentUrl = url ?: "chrome://newtab"
+                        
+                        // ADD THIS LINE: Apply dark mode dynamically the moment the page renders
+                        view?.let { applyDarkModeToWebView(it, _isDarkMode.value) }
+
                         updateTabState(tabId) {
                             it.copy(
                                 isLoading = false,

@@ -20,6 +20,10 @@ android {
     versionName = "1.0"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    ndk {
+        abiFilters.clear()
+        abiFilters.add("arm64-v8a")
+    }
   }
   kotlinOptions {
     jvmTarget = "11"

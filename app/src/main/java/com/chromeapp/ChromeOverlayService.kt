@@ -71,7 +71,7 @@ class ChromeOverlayService : Service() {
             startForeground(
                 NOTIFICATION_ID, 
                 buildNotification(), 
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED
+                1073741824 // This is the exact integer for FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED (0x40000000)
             )
         } else {
             startForeground(NOTIFICATION_ID, buildNotification())
