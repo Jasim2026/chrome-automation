@@ -813,6 +813,16 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             log("Scheduled download for $fileName with cron: $cron", LogType.INFO)
         }
     }
+    // ADD THIS HELPER TO FIX THE COMPILE ERROR:
+    fun downloadFile(
+        url: String,
+        contentDisposition: String? = null,
+        mimetype: String? = null,
+        userAgent: String? = null
+    ) {
+        val fileName = android.webkit.URLUtil.guessFileName(url, contentDisposition, mimetype)
+        startDownload(url, fileName, mimetype, userAgent)
+    }
 
     private fun executeDownload(downloadId: String) {
         viewModelScope.launch(Dispatchers.IO) {
